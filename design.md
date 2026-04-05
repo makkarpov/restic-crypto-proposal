@@ -18,6 +18,7 @@
   * [Performance impact](#performance-impact)
   * [Impact on existing repositories](#impact-on-existing-repositories)
   * [Storage backend implementations](#storage-backend-implementations)
+  * [Implementation challenges](#implementation-challenges)
 
 ## Introduction
 
@@ -413,3 +414,13 @@ A storage backend that aims to fully benefit from the improved append-only capab
 Depending on the allowed time window, an attacker might still be able to trick forget and prune into deleting *some* of the most recent snapshots, depending on the exact *forget* configuration and the permitted timestamp tolerance. However, deleting *all snapshots in the repository*, as it was previously possible with unvalidated timestamps, should no longer be an attack vector. The earlier attack relied on the ability to submit additional monthly, weekly, or yearly garbage snapshots with timestamps slightly newer than the latest legitimate snapshot, causing those garbage snapshots to become the new retention points. Alternatively, an attacker could submit garbage snapshots with timestamps far in the future, making all legitimate snapshots appear old by comparison. With any reasonable time-window validation, this attack would no longer be possible, because it depends on submitting snapshots whose timestamps are weeks, months, or years in the past or future. Count-based retention policies such as `--keep-last` remain inherently vulnerable to snapshot flooding even under perfect backend validation, and therefore should not be used in environments where this class of attack is a concern.
 
 These constraints are not universally applicable. There are legitimate use cases that require submitting retrospective snapshots, bulk blob uploads without strict referential correctness at each blob, or even outright data deletion. For that reason, a storage backend should use transport-layer authentication to distinguish trusted clients from restricted ones, and apply the above validations only to restricted clients. Privileged credentials could then be stored securely, while routine backup jobs use less-privileged restricted credentials.
+
+### Implementation challenges
+
+* The FIPS 203 standard for ML-KEM post-quantum key exchange strongly discourages implementations from exposing internal deterministic functions except for testing purposes, using a "should not" qualifier.
+
+  Go does expose these functions in the `crypto/mlkem/mlkemtest` package, but it explicitly states that they are intended only for testing and disallows their use in FIPS 140 environments. Cloudflare’s `cloudflare/circl` library is more permissive and directly exposes an `EncapsulateTo` function that accepts a seed argument.
+
+  As a result, both optimistic blob verification and ciphertext verification for ML-KEM depend on a library that is willing to expose these internal functions despite the standard’s recommendation against doing so.
+
+* The ML-KEM algorithm carries a small risk of decapsulation failure, meaning that a receiver with the correct private key may still fail to recover the shared secret. Although the estimated failure probabilities are very low (2<sup>-138</sup> for ML-KEM-512 and 2<sup>-174</sup> for ML-KEM-1024), the issue is qualitative rather than quantitative: it would mean that the backup software includes a cryptographic algorithm that is known to have failure cases.
