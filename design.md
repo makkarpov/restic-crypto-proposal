@@ -65,8 +65,8 @@ Actors with access to the management key:
 * **Could** learn high-level data movement patterns, such as the size of each snapshot and how many files were added or deleted.
 * **Could** observe chunk reuse patterns across snapshots, files, and different clients, and attempt to infer the nature of such reuse, for example from adjacent reused blobs or data change patterns.
 * **Could** group and correlate this knowledge into clusters of closely related directories, projects, or activities, although they would have no direct knowledge of their exact nature, paths, or filenames.
-* **Could** view low-level snapshot metadata, such as timestamps, parent snapshots, root backup paths, hostnames and usernames.
-* **Could not** decrypt plaintext data or view plaintext hashes.
+* **Could** view basic snapshot metadata, such as timestamps, parent snapshots, root backup paths, hostnames and usernames.
+* **Could not** decrypt plaintext data, view plaintext hashes or verify plaintext guesses.
 
 Actors who also have access to the backup symmetric key:
 
@@ -306,7 +306,14 @@ EncapsulateKey(PublicKey, PlaintextKey, SymmetricKey, Nonce):
     return { EncapKey, SecretKey }
 
 DecapsulateKey(PrivateKey, EncapKey, SymmetricKey):
-    // inverse of EncapsulateKey (X25519 + ML-KEM decapsulation) + static key, omitted for brevity
+    { X25519Private, MLKEMPrivate } := PrivateKey
+    { X25519EphPublic, MLKEMEncap } := EncapKey
+    
+    StaticSharedKey := KDF(SymmetricKey, Label_BlobStaticSharedKey, 32)
+    X25519Secret := X25519(X25519Private, X25519EphPublic)
+    MLKEMSecret := MLKEMDecapsulate(MLKEMPrivate, MLKEMEncap)
+    
+    return SHA-256(X25519Secret || MLKEMSecret || StaticSharedKey)
 
 AEADEncrypt(Nonce, SecretKey, Plaintext):
     // Note: Poly1305AESEncrypt would return Nonce || Ciphertext || MAC as usual
@@ -344,6 +351,8 @@ The existing restic keyfile mechanism would need to be extended to accommodate t
 Using multiple key files that contain different subsets of these keys would provide a natural and user-friendly way to separate privileges across different actors. Even without exposing users directly to asymmetric cryptography, the system could support three distinct key files, each protected by its own password: one containing only the management key, a second containing the management and backup keys, and a third containing the full key set. This would naturally map to a "management password", a "backup password", and a "master password", which users are likely to find easier to understand than a fully exposed asymmetric-key model. Some of passwords could be combined into a single key file if user does not consider increased complexity to be worth the benefits.
 
 More feature-complete asymmetric encryption tools could also be integrated, with GPG being the most obvious candidate. For example, even the master keyfile could store its private key material only in GPG-encrypted form, making the keyfile alone insufficient to access backup data. Alternatively, the entire key file could simply be a GPG-encrypted blob in a JSON framing, removing the separate password and outer encryption layer entirely and tying access to the corresponding GPG key. Those GPG keys could then be stored on a hardware token, kept offline, or backed up on paper or metal media, benefiting from the broader ecosystem and operational maturity of an established cryptographic toolchain.
+
+Finally, as much as this proposal is aimed at strengthening the security model, there is also practical value in implementing a plaintext cryptographic layer: a simple no-op layer with no keys and no encryption. For desktop use cases, advanced asymmetric cryptography and dedicated backup management servers are really useful and irreplaceable, but in my own *server* setups, restic is more often used to back up the state of applications that contain little sensitive data (Minecraft server worlds being a perfect example) to a storage that is already known to be secure. Today, all such backup workflows include `export RESTIC_PASSWORD="password"` in their scripts, but this is not an ideal solution. In addition to wasting computational effort on unnecessary encryption, it ties the readability of the entire repository to a single key file. If that key file is lost or corrupted, the entire repository becomes unusable, even though no real security goal existed in the first place. Since the introduction of two cryptographic layers would already require the extraction of cryptographic operations into a generic interface, the additional effort needed to implement a plaintext layer becomes trivial.
 
 ## Implementation impact
 
@@ -424,3 +433,5 @@ These constraints are not universally applicable. There are legitimate use cases
   As a result, both optimistic blob verification and ciphertext verification for ML-KEM depend on a library that is willing to expose these internal functions despite the standard’s recommendation against doing so.
 
 * The ML-KEM algorithm carries a small risk of decapsulation failure, meaning that a receiver with the correct private key may still fail to recover the shared secret. Although the estimated failure probabilities are very low (2<sup>-138</sup> for ML-KEM-512 and 2<sup>-174</sup> for ML-KEM-1024), the issue is qualitative rather than quantitative: it would mean that the backup software includes a cryptographic algorithm that is known to have failure cases.
+
+  These concerns can be put in perspective by noting that a blob ID collision is also a hard failure case: the system would confuse two blobs and use the wrong data. For a 256-bit hash, the collision probability is approximately 2<sup>-128</sup>, which is still higher than the probability of ML-KEM decapsulation failure.
